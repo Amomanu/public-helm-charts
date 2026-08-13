@@ -56,6 +56,20 @@ If `ExchangeOnlineManagement` is missing, those three sections are reported as `
 
 ### App registration for unattended runs
 
+**Scripted:** [`setup/new-soc-app-registration.sh`](setup/new-soc-app-registration.sh) does the whole thing with the `az` CLI — app registration, all 25 Graph permissions, `Exchange.ManageAsApp`, the Defender for Endpoint scopes, admin consent, a CSP-compatible certificate, the directory role, and Azure RBAC. It resolves every permission ID from the resource service principal at run time rather than hardcoding GUIDs.
+
+```bash
+# everything, including Azure and Sentinel
+SUBSCRIPTIONS="00000000-1111-2222-3333-444444444444" ./setup/new-soc-app-registration.sh
+
+# identity configuration only — no Exchange, Purview, Azure or Defender API scopes
+SECTIONS=entra ./setup/new-soc-app-registration.sh
+```
+
+It prints the client ID, thumbprint and a ready-to-run export command, and lists the few things it cannot do for you (Sentinel workspace roles, tenant-root Reader, Windows PFX import). Run it from Azure Cloud Shell if you would rather not install `az` locally.
+
+**By hand:**
+
 1. Create an app registration in the customer tenant.
 2. Add the **application** permissions from the matrix below and grant admin consent.
 3. Upload a certificate (`Certificates & secrets` → `Certificates`).
