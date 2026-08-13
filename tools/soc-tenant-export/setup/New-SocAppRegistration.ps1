@@ -165,6 +165,28 @@ function Write-Step { param([string]$Message) Write-Host "==> $Message" -Foregro
 function Write-Ok { param([string]$Message) Write-Host " ok $Message" -ForegroundColor Green }
 function Write-Warn { param([string]$Message) Write-Host " !  $Message" -ForegroundColor Yellow }
 
+function Stop-WithGuidance {
+    <#
+        .SYNOPSIS
+            Prints multi-line troubleshooting text, then throws a one-line error.
+
+        .DESCRIPTION
+            PowerShell's exception renderer collapses a multi-line throw onto a
+            single line, which is precisely where a wall of guidance becomes
+            unreadable. Printing it first keeps the formatting; the short throw
+            still terminates and still gives a non-zero exit code.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Summary, [Parameter(Mandatory)][string]$Guidance)
+
+    Write-Host ''
+    Write-Host $Summary -ForegroundColor Red
+    Write-Host ''
+    Write-Host $Guidance.TrimEnd()
+    Write-Host ''
+    throw $Summary
+}
+
 function Invoke-Az {
     <#
         .SYNOPSIS
@@ -183,12 +205,29 @@ function Invoke-Az {
         [switch]$Raw
     )
 
-    $stdout = & az @Arguments 2>$null
-    $exit = $LASTEXITCODE
+    # Capture stderr to a file rather than discarding it. az reports the actual
+    # reason for a failure there, and throwing only the exit code makes every
+    # failure undiagnosable. A file (not 2>&1) keeps az's routine stderr
+    # warnings out of the success-path output, and out of PowerShell's error
+    # stream where they could trip $ErrorActionPreference.
+    $stderrPath = [IO.Path]::GetTempFileName()
+    try {
+        $stdout = & az @Arguments 2>$stderrPath
+        $exit = $LASTEXITCODE
+        $stderr = if (Test-Path -LiteralPath $stderrPath) {
+            (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+        }
+        else { '' }
+    }
+    finally {
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    }
 
     if ($exit -ne 0) {
         if ($AllowFailure) { return $null }
-        throw "az $($Arguments -join ' ') failed with exit code $exit."
+
+        $detail = if ($stderr -and $stderr.Trim()) { "`n`n$($stderr.Trim())" } else { ' (az produced no error output)' }
+        throw "az $($Arguments -join ' ') failed with exit code $exit.$detail"
     }
 
     if ($Raw -or -not $stdout) { return $stdout }
@@ -347,6 +386,29 @@ if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     throw 'The Azure CLI (az) is not installed or not on PATH. See https://learn.microsoft.com/cli/azure/install-azure-cli'
 }
 
+# Azure CLI 2.37.0 moved the `az ad` commands from Azure AD Graph to Microsoft
+# Graph, which is where --sign-in-audience and the current permission arguments
+# come from. On anything older those arguments are simply unrecognised and every
+# az ad call here fails with a bare exit code.
+$versionInfo = Invoke-Az -AllowFailure -Arguments @('version')
+if ($versionInfo -and $versionInfo.PSObject.Properties['azure-cli']) {
+    $rawVersion = [string]$versionInfo.'azure-cli'
+    $parsed = $null
+    if ([version]::TryParse(($rawVersion -replace '[^0-9.].*$', ''), [ref]$parsed)) {
+        if ($parsed -lt [version]'2.37.0') {
+            Stop-WithGuidance -Summary "Azure CLI $rawVersion is too old (2.37.0 or later is required)." -Guidance @"
+The 'az ad' commands moved to Microsoft Graph in Azure CLI 2.37.0, which is
+where --sign-in-audience and the permission arguments used here come from.
+Older versions reject them and fail with only an exit code.
+
+Upgrade and run this again:
+
+  az upgrade
+"@
+        }
+    }
+}
+
 $account = Invoke-Az -AllowFailure -Arguments @('account', 'show')
 if (-not $account) {
     throw "Not signed in to the Azure CLI. Run: az login --tenant $TenantId --allow-no-subscriptions"
@@ -370,9 +432,7 @@ $tenantMatches = $requested -eq $signedInTenantId -or
 
 if (-not $tenantMatches) {
     $actual = if ($signedInDomain) { "$signedInTenantId ($signedInDomain)" } else { $signedInTenantId }
-    throw @"
-Refusing to act: the Azure CLI is signed in to a different tenant.
-
+    Stop-WithGuidance -Summary 'Refusing to act: the Azure CLI is signed in to a different tenant.' -Guidance @"
   -TenantId requested : $requested
   az signed in to     : $actual
 
@@ -402,9 +462,30 @@ if ($appId -and $appId -ne 'None') {
 }
 elseif ($PSCmdlet.ShouldProcess($AppName, 'Create app registration')) {
     Write-Step "Creating app registration '$AppName'"
-    $created = Invoke-Az -Arguments @(
-        'ad', 'app', 'create', '--display-name', $AppName, '--sign-in-audience', 'AzureADMyOrg')
-    $appId = $created.appId
+    try {
+        $created = Invoke-Az -Arguments @(
+            'ad', 'app', 'create', '--display-name', $AppName, '--sign-in-audience', 'AzureADMyOrg')
+        $appId = $created.appId
+    }
+    catch {
+        Stop-WithGuidance -Summary "Creating the app registration '$AppName' failed." -Guidance @"
+$($_.Exception.Message)
+
+The usual causes, in order:
+
+  * Your account is not allowed to register applications. You need one of
+    Application Developer, Application Administrator, Cloud Application
+    Administrator or Global Administrator. Many tenants set
+    "Users can register applications" to No, which blocks everyone else.
+    Check with:  az ad signed-in-user show --query userPrincipalName
+
+  * Conditional Access or MFA needs a fresh sign-in for Microsoft Graph:
+      az login --tenant $TenantId --allow-no-subscriptions
+
+  * An app named '$AppName' already exists but is not visible to you, so it
+    was neither reused nor creatable. Try a different -AppName.
+"@
+    }
 }
 else {
     $appId = '<app-id>'
