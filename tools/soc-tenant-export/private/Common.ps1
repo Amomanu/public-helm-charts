@@ -108,6 +108,30 @@ function Get-SocProperty {
     return $Default
 }
 
+function Test-SocProperty {
+    <#
+        .SYNOPSIS
+            Reports whether a property is present, regardless of its value.
+
+        .DESCRIPTION
+            Get-SocProperty cannot answer this: PowerShell unrolls collections on
+            return, so a property holding an empty array comes back as $null and
+            is indistinguishable from a property that does not exist. That
+            distinction matters for API responses, where {"value": []} means "an
+            empty collection" and no value property at all means "a single
+            object".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][AllowNull()]$InputObject,
+        [Parameter(Mandatory, Position = 1)][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $false }
+    if ($InputObject -is [System.Collections.IDictionary]) { return $InputObject.Contains($Name) }
+    return $null -ne $InputObject.PSObject.Properties[$Name]
+}
+
 function Get-SocCached {
     <#
         .SYNOPSIS

@@ -10,6 +10,11 @@ Set-StrictMode -Version Latest
 
 $script:SocMaxRetries = 5
 
+# Hard ceiling on pages followed per artifact. Nothing in Graph or ARM should
+# approach this; it exists so that a malformed or self-referential nextLink
+# cannot hang an unattended export indefinitely.
+$script:SocMaxPages = 1000
+
 function Get-SocRetryAfterSeconds {
     <#
         .SYNOPSIS
@@ -159,10 +164,17 @@ function Invoke-SocGraphRequest {
 
     $items = [System.Collections.Generic.List[object]]::new()
     $page = $first
+    $pageCount = 0
     while ($true) {
-        $value = Get-SocProperty $page 'value'
-        if ($null -ne $value) {
-            foreach ($item in @($value)) { $items.Add($item) }
+        $pageCount++
+        # Presence of the value property, not its contents, decides whether this
+        # is a collection response: an endpoint with nothing to return sends
+        # {"value": []}, and PowerShell collapses that empty array to $null on
+        # the way out of Get-SocProperty. Testing the value itself would treat
+        # every empty collection as a bare object and store the raw envelope as
+        # a phantom item.
+        if (Test-SocProperty $page 'value') {
+            foreach ($item in @(Get-SocProperty $page 'value')) { $items.Add($item) }
         }
         elseif ($null -ne $page) {
             # Endpoint returned a bare object where a collection was expected.
@@ -174,6 +186,10 @@ function Invoke-SocGraphRequest {
 
         $next = Get-SocProperty $page '@odata.nextLink'
         if (-not $next) { break }
+        if ($pageCount -ge $script:SocMaxPages) {
+            Write-SocLog -Level Warn -Message "Stopped after $script:SocMaxPages pages for $Path — result may be truncated."
+            break
+        }
 
         $page = Invoke-SocRestRequest -Uri $next -Resource 'Graph' -AdditionalHeaders $headers
     }
@@ -204,10 +220,17 @@ function Invoke-SocArmRequest {
 
     $items = [System.Collections.Generic.List[object]]::new()
     $page = $first
+    $pageCount = 0
     while ($true) {
-        $value = Get-SocProperty $page 'value'
-        if ($null -ne $value) {
-            foreach ($item in @($value)) { $items.Add($item) }
+        $pageCount++
+        # Presence of the value property, not its contents, decides whether this
+        # is a collection response: an endpoint with nothing to return sends
+        # {"value": []}, and PowerShell collapses that empty array to $null on
+        # the way out of Get-SocProperty. Testing the value itself would treat
+        # every empty collection as a bare object and store the raw envelope as
+        # a phantom item.
+        if (Test-SocProperty $page 'value') {
+            foreach ($item in @(Get-SocProperty $page 'value')) { $items.Add($item) }
         }
         elseif ($null -ne $page) {
             $items.Add($page)
@@ -216,6 +239,10 @@ function Invoke-SocArmRequest {
 
         $next = Get-SocProperty $page 'nextLink'
         if (-not $next) { break }
+        if ($pageCount -ge $script:SocMaxPages) {
+            Write-SocLog -Level Warn -Message "Stopped after $script:SocMaxPages pages for $Path — result may be truncated."
+            break
+        }
 
         $page = Invoke-SocRestRequest -Uri $next -Resource 'Arm'
     }
@@ -242,10 +269,17 @@ function Invoke-SocDefenderRequest {
 
     $items = [System.Collections.Generic.List[object]]::new()
     $page = $first
+    $pageCount = 0
     while ($true) {
-        $value = Get-SocProperty $page 'value'
-        if ($null -ne $value) {
-            foreach ($item in @($value)) { $items.Add($item) }
+        $pageCount++
+        # Presence of the value property, not its contents, decides whether this
+        # is a collection response: an endpoint with nothing to return sends
+        # {"value": []}, and PowerShell collapses that empty array to $null on
+        # the way out of Get-SocProperty. Testing the value itself would treat
+        # every empty collection as a bare object and store the raw envelope as
+        # a phantom item.
+        if (Test-SocProperty $page 'value') {
+            foreach ($item in @(Get-SocProperty $page 'value')) { $items.Add($item) }
         }
         elseif ($null -ne $page) {
             $items.Add($page)
@@ -254,6 +288,10 @@ function Invoke-SocDefenderRequest {
 
         $next = Get-SocProperty $page '@odata.nextLink'
         if (-not $next) { break }
+        if ($pageCount -ge $script:SocMaxPages) {
+            Write-SocLog -Level Warn -Message "Stopped after $script:SocMaxPages pages for $Path — result may be truncated."
+            break
+        }
 
         $page = Invoke-SocRestRequest -Uri $next -Resource 'Defender'
     }
