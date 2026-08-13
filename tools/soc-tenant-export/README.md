@@ -8,7 +8,7 @@ It exists to answer three questions that come up constantly in SOC work:
 - **What changed since last time?** — diff two exports to catch configuration drift or an attacker's persistence change.
 - **Where are the blind spots?** — audit logging that is off, alert policies that are disabled, suppression rules and filtering bypasses that hide activity.
 
-It is a companion to [`docs/soc-iam-ticket-workflow.md`](../../docs/soc-iam-ticket-workflow.md): that document covers investigating an identity, this exports the tenant configuration that investigation is judged against.
+It complements per-identity investigation work: an IAM investigation asks what one account did, while this captures the tenant configuration that behaviour has to be judged against.
 
 **The script is strictly read-only.** It issues `GET` requests and `Get-*` cmdlets only, and never modifies tenant state.
 
