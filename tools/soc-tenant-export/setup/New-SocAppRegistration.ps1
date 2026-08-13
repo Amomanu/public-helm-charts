@@ -473,11 +473,17 @@ $($_.Exception.Message)
 
 The usual causes, in order:
 
-  * Your account is not allowed to register applications. You need one of
-    Application Developer, Application Administrator, Cloud Application
-    Administrator or Global Administrator. Many tenants set
+  * Your account is not allowed to register applications. This step needs
+    Application Developer or higher, and many tenants set
     "Users can register applications" to No, which blocks everyone else.
-    Check with:  az ad signed-in-user show --query userPrincipalName
+    Check who you are with:
+      az ad signed-in-user show --query userPrincipalName
+
+    Note that a later step needs more: granting admin consent for Microsoft
+    Graph app roles requires Privileged Role Administrator. Application
+    Administrator and Cloud Application Administrator are explicitly excluded
+    from consenting to those, so starting with one of them will get you past
+    this step and fail at consent instead.
 
   * Conditional Access or MFA needs a fresh sign-in for Microsoft Graph:
       az login --tenant $TenantId --allow-no-subscriptions

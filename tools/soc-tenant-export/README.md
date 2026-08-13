@@ -72,6 +72,22 @@ If `ExchangeOnlineManagement` is missing, those three sections are reported as `
 ./setup/New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com -WhatIf
 ```
 
+#### Who can run it
+
+Each step needs a different privilege, and they are not the same role. The consent step is the binding constraint:
+
+| Step | Minimum role |
+|---|---|
+| Create the app registration and service principal | **Application Developer** — or any user, if *Users can register applications* is left at its default of Yes |
+| Request the API permissions | Application Developer (own app), or Application Administrator |
+| **Grant admin consent for the Microsoft Graph app roles** | **Privileged Role Administrator** |
+| Assign the `Global Reader` directory role (Exchange/Purview only) | **Privileged Role Administrator** |
+| Azure RBAC at the tenant root (`-TenantRootScope`) | A Global Administrator elevates access, then Owner or User Access Administrator at the root management group |
+
+**Application Administrator and Cloud Application Administrator are not sufficient.** Both can create the app and request the permissions, but Microsoft [explicitly excludes Microsoft Graph app roles](https://learn.microsoft.com/entra/identity/enterprise-apps/grant-admin-consent) from what they may consent to — and every permission this tool needs is a Microsoft Graph application permission. Consent will fail at the last step with the app already created.
+
+In practice: **Privileged Role Administrator** covers everything except Azure RBAC in a default tenant, and **Global Administrator** covers all of it.
+
 `-TenantId` is required and is checked against the tenant the Azure CLI is signed in to; the script stops if they differ. Everything it does is directory-scoped and consequential — an app registration, admin consent, a directory role — so it will not act on whichever tenant a stale `az login` happens to point at. Confirm what you are pointed at with `az account show --query tenantId -o tsv`.
 
 On Windows it creates the certificate with a CSP key provider, so the Exchange CNG restriction below is handled for you. It prints the client ID, thumbprint and a ready-to-run export command, and lists what it cannot do on your behalf.
