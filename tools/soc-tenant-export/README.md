@@ -56,17 +56,22 @@ If `ExchangeOnlineManagement` is missing, those three sections are reported as `
 
 ### App registration for unattended runs
 
-**Scripted:** [`setup/new-soc-app-registration.sh`](setup/new-soc-app-registration.sh) does the whole thing with the `az` CLI — app registration, all 25 Graph permissions, `Exchange.ManageAsApp`, the Defender for Endpoint scopes, admin consent, a CSP-compatible certificate, the directory role, and Azure RBAC. It resolves every permission ID from the resource service principal at run time rather than hardcoding GUIDs.
+**Scripted:** [`setup/New-SocAppRegistration.ps1`](setup/New-SocAppRegistration.ps1) does the whole thing — app registration, all 25 Graph permissions, `Exchange.ManageAsApp`, the Defender for Endpoint scopes, admin consent, a certificate, the directory role, and Azure RBAC. It drives the `az` CLI, and resolves every permission ID from the resource service principal at run time rather than hardcoding GUIDs.
 
-```bash
+```powershell
 # everything, including Azure and Sentinel
-SUBSCRIPTIONS="00000000-1111-2222-3333-444444444444" ./setup/new-soc-app-registration.sh
+./setup/New-SocAppRegistration.ps1 -SubscriptionId 00000000-1111-2222-3333-444444444444
 
 # identity configuration only — no Exchange, Purview, Azure or Defender API scopes
-SECTIONS=entra ./setup/new-soc-app-registration.sh
+./setup/New-SocAppRegistration.ps1 -Sections Entra
+
+# see what it would create and grant, without changing anything
+./setup/New-SocAppRegistration.ps1 -WhatIf
 ```
 
-It prints the client ID, thumbprint and a ready-to-run export command, and lists the few things it cannot do for you (Sentinel workspace roles, tenant-root Reader, Windows PFX import). Run it from Azure Cloud Shell if you would rather not install `az` locally.
+On Windows it creates the certificate with a CSP key provider, so the Exchange CNG restriction below is handled for you. It prints the client ID, thumbprint and a ready-to-run export command, and lists what it cannot do on your behalf (Sentinel workspace roles, tenant-root Reader).
+
+A bash equivalent, [`setup/new-soc-app-registration.sh`](setup/new-soc-app-registration.sh), is kept for Azure Cloud Shell and Linux hosts where `az` is available but PowerShell is not. Both request an identical permission set.
 
 **By hand:**
 
@@ -129,7 +134,7 @@ The 60 artifacts in the `ExchangeOnline`, `DefenderOffice` and `Purview` section
 2. **An Entra directory role assigned to the service principal** — `Global Reader` covers all three sections read-only. Alternatively add the service principal to an Exchange role group for tighter scoping (`New-ServicePrincipal` + `Add-RoleGroupMember`).
 3. **A certificate**, not a client secret. Exchange Online app-only has no client-secret path, which is why `-AuthMode ClientSecret` reports these sections as skipped.
 
-> **Certificate gotcha:** Exchange app-only does not accept CNG certificates, which is what modern Windows creates by default. The certificate must come from a CSP key provider. See [app-only authentication for Exchange Online PowerShell](https://learn.microsoft.com/powershell/exchange/app-only-auth-powershell-v2).
+> **Certificate gotcha:** Exchange app-only does not accept CNG certificates, which is what `New-SelfSignedCertificate` produces by default on modern Windows. The certificate must come from a CSP key provider — `New-SocAppRegistration.ps1` passes `-Provider "Microsoft Enhanced RSA and AES Cryptographic Provider"` to force this. If you supply your own certificate, check it the same way. See [app-only authentication for Exchange Online PowerShell](https://learn.microsoft.com/powershell/exchange/app-only-auth-powershell-v2).
 
 ## Sections
 
