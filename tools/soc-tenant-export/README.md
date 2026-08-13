@@ -59,19 +59,32 @@ If `ExchangeOnlineManagement` is missing, those three sections are reported as `
 **Scripted:** [`setup/New-SocAppRegistration.ps1`](setup/New-SocAppRegistration.ps1) does the whole thing — app registration, all 25 Graph permissions, `Exchange.ManageAsApp`, the Defender for Endpoint scopes, admin consent, a certificate, the directory role, and Azure RBAC. It drives the `az` CLI, and resolves every permission ID from the resource service principal at run time rather than hardcoding GUIDs.
 
 ```powershell
-# everything, including Azure and Sentinel
-./setup/New-SocAppRegistration.ps1 -SubscriptionId 00000000-1111-2222-3333-444444444444
+# directory permissions only
+./setup/New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com
+
+# also grant the Azure RBAC the Azure and Sentinel sections need
+./setup/New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com -TenantRootScope
 
 # identity configuration only — no Exchange, Purview, Azure or Defender API scopes
-./setup/New-SocAppRegistration.ps1 -Sections Entra
+./setup/New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com -Sections Entra
 
 # see what it would create and grant, without changing anything
-./setup/New-SocAppRegistration.ps1 -WhatIf
+./setup/New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com -WhatIf
 ```
 
-On Windows it creates the certificate with a CSP key provider, so the Exchange CNG restriction below is handled for you. It prints the client ID, thumbprint and a ready-to-run export command, and lists what it cannot do on your behalf (Sentinel workspace roles, tenant-root Reader).
+`-TenantId` is required and is checked against the tenant the Azure CLI is signed in to; the script stops if they differ. Everything it does is directory-scoped and consequential — an app registration, admin consent, a directory role — so it will not act on whichever tenant a stale `az login` happens to point at. Confirm what you are pointed at with `az account show --query tenantId -o tsv`.
 
-A bash equivalent, [`setup/new-soc-app-registration.sh`](setup/new-soc-app-registration.sh), is kept for Azure Cloud Shell and Linux hosts where `az` is available but PowerShell is not. Both request an identical permission set.
+On Windows it creates the certificate with a CSP key provider, so the Exchange CNG restriction below is handled for you. It prints the client ID, thumbprint and a ready-to-run export command, and lists what it cannot do on your behalf.
+
+A bash equivalent, [`setup/new-soc-app-registration.sh`](setup/new-soc-app-registration.sh), is kept for Azure Cloud Shell and Linux hosts where `az` is available but PowerShell is not. It takes the same settings as environment variables (`TENANT_ID`, `SECTIONS`, `TENANT_ROOT_SCOPE`) and requests an identical permission set.
+
+### Why Azure needs a separate grant
+
+Microsoft Entra and Azure are secured independently: **Entra role assignments grant no access to Azure resources, and Azure role assignments grant no access to Entra.** The Graph application permissions above are tenant-wide and cover the identity sections outright, but they give the service principal nothing over Azure resources. Defender for Cloud, Sentinel, Log Analytics and diagnostic settings all live inside subscriptions and are governed by Azure RBAC.
+
+There is no per-subscription parameter, because enumerating subscriptions is the wrong shape for a per-tenant export. `-TenantRootScope` assigns `Reader` and `Security Reader` once at the tenant root management group — which carries the tenant's own ID, and which every subscription in the directory inherits from, including subscriptions created later. This is also what [Defender for Cloud recommends](https://learn.microsoft.com/azure/defender-for-cloud/tenant-wide-permissions-management) for tenant-wide visibility.
+
+The catch is that nobody has access to the root management group by default, so a Global Administrator has to [elevate access](https://learn.microsoft.com/azure/role-based-access-control/elevate-access-global-admin) once under **Entra ID > Properties > Access management for Azure resources**. That is why it is opt-in rather than the default. Skip it and the Azure and Sentinel sections simply report as skipped; the script prints the command to grant it later.
 
 **By hand:**
 

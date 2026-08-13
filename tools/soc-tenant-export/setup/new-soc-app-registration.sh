@@ -10,10 +10,10 @@
 # and grant admin consent (Global Administrator, or Application Administrator
 # plus Privileged Role Administrator).
 #
-# Usage:
-#   ./new-soc-app-registration.sh                       # everything
-#   SECTIONS=entra ./new-soc-app-registration.sh        # identity only
-#   SUBSCRIPTIONS="sub-id-1 sub-id-2" ./new-soc-app-registration.sh
+# Usage (TENANT_ID is required and is verified against the signed-in tenant):
+#   TENANT_ID=contoso.onmicrosoft.com ./new-soc-app-registration.sh
+#   TENANT_ID=contoso.onmicrosoft.com SECTIONS=entra ./new-soc-app-registration.sh
+#   TENANT_ID=contoso.onmicrosoft.com TENANT_ROOT_SCOPE=1 ./new-soc-app-registration.sh
 
 set -euo pipefail
 
@@ -28,9 +28,14 @@ CERT_DAYS="${CERT_DAYS:-730}"
 # all | entra — "entra" grants only what the Entra/Applications sections need.
 SECTIONS="${SECTIONS:-all}"
 
-# Space-separated subscription IDs for the Azure/Sentinel sections. Empty skips
-# Azure RBAC entirely.
-SUBSCRIPTIONS="${SUBSCRIPTIONS:-}"
+# The tenant to provision in, as a GUID or verified domain. Required, and
+# checked against the tenant az is signed in to.
+TENANT_ID="${TENANT_ID:-}"
+
+# Set to 1 to also grant Reader and Security Reader at the tenant root
+# management group, which every subscription inherits from. Needed for the Azure
+# and Sentinel sections; requires a Global Administrator to have elevated access.
+TENANT_ROOT_SCOPE="${TENANT_ROOT_SCOPE:-}"
 
 # Directory role granted to the service principal. Required for the Exchange,
 # Defender for Office 365 and Purview sections; harmless otherwise.
@@ -115,10 +120,27 @@ role_id_for() {
 
 command -v az >/dev/null || die "az CLI not found."
 command -v openssl >/dev/null || die "openssl not found."
-az account show >/dev/null 2>&1 || die "Not signed in. Run: az login --allow-no-subscriptions"
+[[ -n "$TENANT_ID" ]] || die "TENANT_ID is required. Example: TENANT_ID=contoso.onmicrosoft.com $0"
 
-TENANT_ID=$(az account show --query tenantId -o tsv)
-log "Tenant: $TENANT_ID"
+az account show >/dev/null 2>&1 || die "Not signed in. Run: az login --tenant $TENANT_ID --allow-no-subscriptions"
+
+SIGNED_IN_TENANT=$(az account show --query tenantId -o tsv)
+SIGNED_IN_DOMAIN=$(az rest --method GET --url "https://graph.microsoft.com/v1.0/domains" \
+  --query "value[?isInitial].id | [0]" -o tsv 2>/dev/null || echo "")
+[[ "$SIGNED_IN_DOMAIN" == "None" ]] && SIGNED_IN_DOMAIN=""
+
+# Everything here is directory-scoped and hard to walk back — an app
+# registration, admin consent, a directory role. Confirm the signed-in tenant is
+# the one that was asked for rather than whichever tenant a stale az login
+# points at, which is how an MSP provisions into the wrong customer.
+if [[ "$TENANT_ID" != "$SIGNED_IN_TENANT" && "$TENANT_ID" != "$SIGNED_IN_DOMAIN" ]]; then
+  die "Refusing to act: az is signed in to $SIGNED_IN_TENANT ($SIGNED_IN_DOMAIN), not $TENANT_ID.
+     Sign in to the intended tenant:  az login --tenant $TENANT_ID --allow-no-subscriptions"
+fi
+
+TENANT_ID="$SIGNED_IN_TENANT"
+PRIMARY_DOMAIN="${SIGNED_IN_DOMAIN:-$TENANT_ID}"
+log "Tenant: $PRIMARY_DOMAIN ($TENANT_ID)"
 
 # ---------------------------------------------------------------------------
 # App registration and service principal
@@ -268,24 +290,32 @@ fi
 # Azure RBAC
 # ---------------------------------------------------------------------------
 
-for subscription in $SUBSCRIPTIONS; do
-  log "Assigning Azure roles on subscription $subscription"
-  for role in "Reader" "Security Reader"; do
-    az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
-      --assignee-principal-type ServicePrincipal --role "$role" \
-      --scope "/subscriptions/${subscription}" --only-show-errors >/dev/null 2>&1 &&
-      log "  $role" || warn "  $role assignment failed (may already exist)"
-  done
-done
+# The root management group carries the tenant's own ID, and every subscription
+# in the directory inherits from it — including ones created after this runs. One
+# assignment here is the tenant-shaped equivalent of enumerating subscriptions.
+ROOT_MG_SCOPE="/providers/Microsoft.Management/managementGroups/$TENANT_ID"
+AZURE_ROLES_ASSIGNED=""
 
-[[ -z "$SUBSCRIPTIONS" ]] && warn "No SUBSCRIPTIONS set — Azure and Sentinel sections will be skipped."
+if [[ -n "$TENANT_ROOT_SCOPE" ]]; then
+  log "Assigning Azure roles at the tenant root management group"
+  for role in "Reader" "Security Reader"; do
+    if az role assignment create --assignee-object-id "$SP_OBJECT_ID" \
+        --assignee-principal-type ServicePrincipal --role "$role" \
+        --scope "$ROOT_MG_SCOPE" --only-show-errors >/dev/null 2>&1; then
+      log "  $role"
+      AZURE_ROLES_ASSIGNED=1
+    else
+      warn "  $role assignment failed — it may already exist, or you lack access to the root management group."
+      warn "  A Global Administrator must elevate access first: Entra ID > Properties > Access management for Azure resources."
+    fi
+  done
+else
+  warn "TENANT_ROOT_SCOPE not set — Azure and Sentinel sections will be skipped."
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-
-PRIMARY_DOMAIN=$(az rest --method GET --url "https://graph.microsoft.com/v1.0/domains" \
-  --query "value[?isInitial].id | [0]" -o tsv 2>/dev/null || echo "$TENANT_ID")
 
 cat <<SUMMARY
 
@@ -309,11 +339,15 @@ Then run the export:
       -ClientId $APP_ID \\
       -CertificatePath $CERT_DIR/soc-export.pfx
 
-Still to do by hand:
+Still to do by hand:${AZURE_ROLES_ASSIGNED:+
+  (Azure RBAC already granted at the tenant root management group.)}${AZURE_ROLES_ASSIGNED:-
+  * Azure RBAC for the Azure and Sentinel sections. Graph permissions grant
+    nothing over Azure resources, so those sections stay skipped until this is
+    in place. Re-run with TENANT_ROOT_SCOPE=1, or:
+      az role assignment create --assignee-object-id $SP_OBJECT_ID \\
+          --assignee-principal-type ServicePrincipal --role Reader \\
+          --scope $ROOT_MG_SCOPE}
   * Microsoft Sentinel Reader on any Sentinel workspace you want collected.
-  * Reader at tenant root for the entra-diagnostic-settings artifact
-    (Global Administrator must first elevate access at
-     Entra ID > Properties > Access management for Azure resources).
   * On Windows, import the PFX with a CSP provider — Exchange app-only rejects
     CNG certificates:
       certutil -importpfx -csp "Microsoft Enhanced RSA and AES Cryptographic Provider" \\

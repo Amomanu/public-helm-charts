@@ -25,6 +25,14 @@
     Administrator, or Application Administrator plus Privileged Role
     Administrator.
 
+.PARAMETER TenantId
+    The tenant to provision in, as a GUID or a verified domain. Required.
+
+    This is checked against the tenant the Azure CLI is actually signed in to,
+    and the script stops if they differ. Everything here is directory-scoped and
+    consequential — an app registration, admin consent, a directory role — so it
+    refuses to act on whichever tenant a stale `az login` happens to point at.
+
 .PARAMETER AppName
     Display name for the app registration. An existing app with this name is
     reused rather than duplicated.
@@ -35,9 +43,27 @@
             Nothing for Exchange, Purview, Intune, Governance or the Defender
             API is requested or consented to.
 
-.PARAMETER SubscriptionId
-    Subscriptions to assign Reader and Security Reader on, for the Azure and
-    Sentinel sections. Omit to skip Azure RBAC entirely.
+.PARAMETER TenantRootScope
+    Also grant the Azure RBAC needed by the Azure and Sentinel sections, once, at
+    the tenant root management group.
+
+    Azure RBAC is a separate permission system from Microsoft Entra. Graph
+    application permissions are tenant-wide and cover the identity sections
+    outright, but they grant nothing over Azure resources: Defender for Cloud,
+    Sentinel, Log Analytics and diagnostic settings all live inside
+    subscriptions and are governed by Azure role assignments.
+
+    The tenant root management group has the same ID as the tenant, and every
+    subscription in the directory inherits from it — including subscriptions
+    created later. That makes one assignment here the tenant-shaped answer, and
+    it is what Defender for Cloud itself recommends for tenant-wide visibility.
+
+    The cost is that nobody has access to the root management group by default:
+    a Global Administrator must first elevate access under Entra ID >
+    Properties > Access management for Azure resources. An assignment at this
+    scope applies to every resource in the directory, so it is opt-in rather
+    than default. Without it the Azure and Sentinel sections report as skipped,
+    and the summary prints the command to grant it later.
 
 .PARAMETER DirectoryRole
     Directory role assigned to the service principal. Required for the Exchange,
@@ -54,17 +80,23 @@
     Do not create or upload a certificate. Use when attaching your own.
 
 .EXAMPLE
-    ./New-SocAppRegistration.ps1 -SubscriptionId 00000000-1111-2222-3333-444444444444
+    ./New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com
 
-    Everything, including Azure RBAC on one subscription.
+    Directory permissions only. The Azure and Sentinel sections are left
+    unprovisioned; the summary prints how to grant them later.
 
 .EXAMPLE
-    ./New-SocAppRegistration.ps1 -Sections Entra
+    ./New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com -TenantRootScope
+
+    Everything, including Azure RBAC covering every subscription in the tenant.
+
+.EXAMPLE
+    ./New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com -Sections Entra
 
     Identity configuration only — no Exchange, Purview, Defender or Azure scopes.
 
 .EXAMPLE
-    ./New-SocAppRegistration.ps1 -WhatIf
+    ./New-SocAppRegistration.ps1 -TenantId contoso.onmicrosoft.com -WhatIf
 
     Show what would be created and granted without changing anything.
 
@@ -75,12 +107,16 @@
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string]$TenantId,
+
     [string]$AppName = 'SOC Tenant Settings Export',
 
     [ValidateSet('All', 'Entra')]
     [string]$Sections = 'All',
 
-    [string[]]$SubscriptionId,
+    [switch]$TenantRootScope,
 
     [string]$DirectoryRole = 'Global Reader',
 
@@ -313,11 +349,45 @@ if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
 
 $account = Invoke-Az -AllowFailure -Arguments @('account', 'show')
 if (-not $account) {
-    throw 'Not signed in to the Azure CLI. Run: az login --allow-no-subscriptions'
+    throw "Not signed in to the Azure CLI. Run: az login --tenant $TenantId --allow-no-subscriptions"
 }
 
-$tenantId = $account.tenantId
-Write-Step "Tenant: $tenantId"
+$signedInTenantId = $account.tenantId
+
+# The tenant's initial domain, so -TenantId can be given either way.
+$signedInDomain = ($(Invoke-Az -AllowFailure -Raw -Arguments @(
+            'rest', '--method', 'GET', '--url', 'https://graph.microsoft.com/v1.0/domains',
+            '--query', 'value[?isInitial].id | [0]', '-o', 'tsv')) | Out-String).Trim()
+if ($signedInDomain -eq 'None') { $signedInDomain = '' }
+
+# Everything this script does is directory-scoped and hard to walk back — an app
+# registration, admin consent, a directory role. Confirm the signed-in tenant is
+# the one that was asked for rather than whichever tenant a stale az login points
+# at, which is how an MSP provisions into the wrong customer.
+$requested = $TenantId.Trim()
+$tenantMatches = $requested -eq $signedInTenantId -or
+    ($signedInDomain -and $requested -eq $signedInDomain)
+
+if (-not $tenantMatches) {
+    $actual = if ($signedInDomain) { "$signedInTenantId ($signedInDomain)" } else { $signedInTenantId }
+    throw @"
+Refusing to act: the Azure CLI is signed in to a different tenant.
+
+  -TenantId requested : $requested
+  az signed in to     : $actual
+
+This script creates an app registration, grants admin consent and assigns a
+directory role, so it will not run against a tenant you did not name.
+
+Sign in to the intended tenant and run it again:
+
+  az login --tenant $requested --allow-no-subscriptions
+"@
+}
+
+$tenantId = $signedInTenantId
+$primaryDomain = if ($signedInDomain) { $signedInDomain } else { $tenantId }
+Write-Step "Tenant: $primaryDomain ($tenantId)"
 
 # ---------------------------------------------------------------------------
 # App registration and service principal
@@ -462,34 +532,42 @@ if ($Sections -eq 'All' -and $servicePrincipalObjectId -and
 # Azure RBAC
 # ---------------------------------------------------------------------------
 
-if ($SubscriptionId -and $servicePrincipalObjectId) {
-    foreach ($subscription in $SubscriptionId) {
-        Write-Step "Assigning Azure roles on subscription $subscription"
-        foreach ($role in 'Reader', 'Security Reader') {
-            if (-not $PSCmdlet.ShouldProcess("$subscription", "Assign '$role'")) { continue }
+# The root management group carries the tenant's own ID, and every subscription
+# in the directory inherits from it — including ones created after this runs.
+# One assignment here is the tenant-shaped equivalent of enumerating every
+# subscription, which is why there is no per-subscription parameter.
+$rootManagementGroupScope = "/providers/Microsoft.Management/managementGroups/$tenantId"
+$azureRolesAssigned = $false
 
-            $result = Invoke-Az -AllowFailure -Arguments @(
-                'role', 'assignment', 'create',
-                '--assignee-object-id', $servicePrincipalObjectId,
-                '--assignee-principal-type', 'ServicePrincipal',
-                '--role', $role, '--scope', "/subscriptions/$subscription", '--only-show-errors')
+if ($TenantRootScope -and $servicePrincipalObjectId) {
+    Write-Step 'Assigning Azure roles at the tenant root management group'
 
-            if ($result) { Write-Ok "  $role" } else { Write-Warn "  $role assignment failed (may already exist)" }
+    foreach ($role in 'Reader', 'Security Reader') {
+        if (-not $PSCmdlet.ShouldProcess($rootManagementGroupScope, "Assign '$role'")) { continue }
+
+        $result = Invoke-Az -AllowFailure -Arguments @(
+            'role', 'assignment', 'create',
+            '--assignee-object-id', $servicePrincipalObjectId,
+            '--assignee-principal-type', 'ServicePrincipal',
+            '--role', $role, '--scope', $rootManagementGroupScope, '--only-show-errors')
+
+        if ($result) {
+            Write-Ok "  $role"
+            $azureRolesAssigned = $true
+        }
+        else {
+            Write-Warn "  $role assignment failed — it may already exist, or you lack access to the root management group."
+            Write-Warn '  A Global Administrator must elevate access first: Entra ID > Properties > Access management for Azure resources.'
         }
     }
 }
-else {
-    Write-Warn 'No -SubscriptionId supplied — Azure and Sentinel sections will be skipped.'
+elseif (-not $TenantRootScope) {
+    Write-Warn 'No -TenantRootScope — Azure and Sentinel sections will report as skipped. See the summary for how to grant this later.'
 }
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
-
-$primaryDomain = ($(Invoke-Az -AllowFailure -Raw -Arguments @(
-            'rest', '--method', 'GET', '--url', 'https://graph.microsoft.com/v1.0/domains',
-            '--query', 'value[?isInitial].id | [0]', '-o', 'tsv')) | Out-String).Trim()
-if (-not $primaryDomain -or $primaryDomain -eq 'None') { $primaryDomain = $tenantId }
 
 Write-Host ''
 Write-Host 'App registration ready.' -ForegroundColor Green
@@ -522,7 +600,21 @@ elseif ($certificate) {
 
 Write-Host ''
 Write-Host 'Still to do by hand:' -ForegroundColor Yellow
+
+if (-not $azureRolesAssigned) {
+    Write-Host '  * Azure RBAC for the Azure and Sentinel sections. Graph permissions grant'
+    Write-Host '    nothing over Azure resources, so those sections stay skipped until this'
+    Write-Host '    is in place. One assignment at the tenant root covers every subscription,'
+    Write-Host '    including future ones (a Global Administrator must elevate access first,'
+    Write-Host '    under Entra ID > Properties > Access management for Azure resources):'
+    Write-Host ''
+    foreach ($role in 'Reader', 'Security Reader') {
+        Write-Host "      az role assignment create --assignee-object-id $servicePrincipalObjectId ``"
+        Write-Host "          --assignee-principal-type ServicePrincipal --role '$role' ``"
+        Write-Host "          --scope $rootManagementGroupScope"
+    }
+    Write-Host ''
+    Write-Host '    Or re-run this script with -TenantRootScope.'
+}
+
 Write-Host '  * Microsoft Sentinel Reader on any Sentinel workspace you want collected.'
-Write-Host '  * Reader at tenant root for the entra-diagnostic-settings artifact (a Global'
-Write-Host '    Administrator must first elevate access under Entra ID > Properties >'
-Write-Host '    Access management for Azure resources).'
