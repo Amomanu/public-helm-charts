@@ -16,6 +16,17 @@ $script:SocExchangeState = @{
     ComplianceSkipReason = $null
 }
 
+# App-only Exchange access fails for a small set of well-known reasons, and the
+# raw SDK error rarely names any of them. Appending this to the recorded skip
+# reason puts the fix in the collection log next to the failure.
+$script:SocExchangeSetupHint = [string]::Join(' ', @(
+        ' — app-only Exchange/Purview access requires all of:'
+        '(1) the Exchange.ManageAsApp application permission on the Office 365 Exchange Online API (not Microsoft Graph), with admin consent;'
+        '(2) an Entra directory role such as Global Reader assigned to the service principal;'
+        '(3) a CSP-provider certificate (CNG certificates are not supported).'
+        'See https://learn.microsoft.com/powershell/exchange/app-only-auth-powershell-v2'
+    ))
+
 # Exchange deserialisation noise that adds size without adding evidence.
 $script:SocExchangeNoiseProperties = @(
     'RunspaceId', 'PSComputerName', 'PSShowComputerName', 'PSSourceJobInstanceId',
@@ -82,7 +93,8 @@ function Connect-SocExchangeOnline {
         }
     }
     catch {
-        $script:SocExchangeState.ExchangeSkipReason = "Connect-ExchangeOnline failed: $($_.Exception.Message)"
+        $script:SocExchangeState.ExchangeSkipReason =
+            "Connect-ExchangeOnline failed: $($_.Exception.Message)$script:SocExchangeSetupHint"
         return $false
     }
 
@@ -132,7 +144,8 @@ function Connect-SocCompliance {
         }
     }
     catch {
-        $script:SocExchangeState.ComplianceSkipReason = "Connect-IPPSSession failed: $($_.Exception.Message)"
+        $script:SocExchangeState.ComplianceSkipReason =
+            "Connect-IPPSSession failed: $($_.Exception.Message)$script:SocExchangeSetupHint"
         return $false
     }
 

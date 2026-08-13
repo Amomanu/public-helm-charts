@@ -59,8 +59,8 @@ If `ExchangeOnlineManagement` is missing, those three sections are reported as `
 1. Create an app registration in the customer tenant.
 2. Add the **application** permissions from the matrix below and grant admin consent.
 3. Upload a certificate (`Certificates & secrets` → `Certificates`).
-4. For the Exchange, Defender for Office 365 and Purview sections, also assign the app a directory role with read access to those workloads — **Global Reader** or **Security Reader** is normally sufficient. See [app-only access in Exchange Online](https://learn.microsoft.com/powershell/exchange/app-only-auth-powershell-v2).
-5. For the Azure and Sentinel sections, assign **Reader** and **Security Reader** on each subscription, plus **Microsoft Sentinel Reader** on the Sentinel workspaces.
+4. For the Azure and Sentinel sections, assign **Reader** and **Security Reader** on each subscription, plus **Microsoft Sentinel Reader** on the Sentinel workspaces, and **Reader** at the tenant root for the Entra diagnostic settings artifact.
+5. For the Exchange, Defender for Office 365 and Purview sections, see the extra setup under [Exchange and Purview](#exchange-and-purview-extra-setup) — a Graph permission alone is not enough for those.
 
 Run `-ListArtifacts` to produce the exact list for the sections you intend to collect:
 
@@ -71,15 +71,51 @@ Run `-ListArtifacts` to produce the exact list for the sections you intend to co
 
 ### Permission matrix
 
-**Microsoft Graph — application permissions (all read-only):**
+Microsoft Graph **application** permissions, all read-only. The section column lets you drop any permission whose section you are not collecting.
 
-`AccessReview.Read.All`, `AdministrativeUnit.Read.All`, `Agreement.Read.All`, `Application.Read.All`, `AuditLog.Read.All`, `CustomDetection.Read.All`, `Device.Read.All`, `DeviceManagementApps.Read.All`, `DeviceManagementConfiguration.Read.All`, `DeviceManagementManagedDevices.Read.All`, `DeviceManagementServiceConfig.Read.All`, `Directory.Read.All`, `Domain.Read.All`, `EntitlementManagement.Read.All`, `IdentityRiskyServicePrincipal.Read.All`, `IdentityRiskyUser.Read.All`, `Organization.Read.All`, `Policy.Read.All`, `Policy.Read.AuthenticationMethod`, `Policy.Read.PermissionGrant`, `PrivilegedAccess.Read.AzureADGroup`, `RoleManagement.Read.Directory`, `SecurityAlert.Read.All`, `SecurityEvents.Read.All`, `User.Read.All`
+| Permission | Artifacts | Needed for |
+|---|---|---|
+| `Policy.Read.All` | 15 | Entra, Intune |
+| `RoleManagement.Read.Directory` | 6 | Entra |
+| `Application.Read.All` | 5 | Applications |
+| `Directory.Read.All` | 3 | Entra, Applications |
+| `Organization.Read.All` | 3 | Entra |
+| `Policy.Read.AuthenticationMethod` | 3 | Entra |
+| `AuditLog.Read.All` | 2 | Entra |
+| `Domain.Read.All` | 2 | Entra |
+| `AdministrativeUnit.Read.All` | 1 | Entra |
+| `Device.Read.All` | 1 | Entra (Extended) |
+| `IdentityRiskyUser.Read.All` | 1 | Entra (P2) |
+| `IdentityRiskyServicePrincipal.Read.All` | 1 | Entra (Workload ID Premium) |
+| `Policy.Read.PermissionGrant` | 1 | Entra |
+| `User.Read.All` | 1 | Entra (Extended) |
+| `DeviceManagementConfiguration.Read.All` | 7 | Intune |
+| `DeviceManagementApps.Read.All` | 3 | Intune |
+| `DeviceManagementManagedDevices.Read.All` | 1 | Intune (Extended) |
+| `DeviceManagementServiceConfig.Read.All` | 1 | Intune |
+| `EntitlementManagement.Read.All` | 3 | Governance (P2) |
+| `AccessReview.Read.All` | 1 | Governance (P2) |
+| `Agreement.Read.All` | 1 | Governance |
+| `PrivilegedAccess.Read.AzureADGroup` | 1 | Governance (P2) |
+| `SecurityEvents.Read.All` | 2 | DefenderXdr |
+| `CustomDetection.Read.All` | 1 | DefenderXdr |
+| `SecurityAlert.Read.All` | 1 | DefenderXdr (Extended) |
 
-**Azure RBAC:** `Reader` and `Security Reader` per subscription; `Microsoft Sentinel Reader` for Sentinel; `Reader` at tenant root (or Security Reader) for the Entra diagnostic settings artifact.
+**Azure RBAC** (not Graph — assign to the service principal on the resources): `Security Reader` (9 artifacts), `Microsoft Sentinel Reader` (7), `Reader` (6), and `Reader` at tenant root for `entra-diagnostic-settings`. `User Access Administrator` only if you want complete results from the Extended `azure-role-assignments` artifact.
 
-**Defender for Endpoint API (`WindowsDefenderATP`):** `Score.Read.All`, `SecurityRecommendation.Read.All`, and — for the custom indicators artifact — `Ti.ReadWrite.All`.
+**Defender for Endpoint API** — a separate resource (`WindowsDefenderATP`), not Microsoft Graph: `Score.Read.All` (2 artifacts), `SecurityRecommendation.Read.All` (1), `Ti.ReadWrite.All` (1).
 
 > **On `Ti.ReadWrite.All`:** Microsoft's [List Indicators API](https://learn.microsoft.com/defender-endpoint/api/get-ti-indicators-collection) publishes no read-only permission; `Ti.ReadWrite` / `Ti.ReadWrite.All` is the only option for listing indicators. The script issues a `GET` and nothing else, but the granted scope is write-capable. If that is unacceptable for your engagement, omit it — `defender-indicators` will report `SkippedNoPermission` and the rest of the section still runs.
+
+### Exchange and Purview: extra setup
+
+The 60 artifacts in the `ExchangeOnline`, `DefenderOffice` and `Purview` sections run as PowerShell cmdlets, not Graph calls. Graph permissions do nothing for them. They need three things:
+
+1. **Application permission `Exchange.ManageAsApp`** on the **Office 365 Exchange Online** API (not Microsoft Graph), with admin consent. Without it, `Connect-ExchangeOnline` app-only fails outright.
+2. **An Entra directory role assigned to the service principal** — `Global Reader` covers all three sections read-only. Alternatively add the service principal to an Exchange role group for tighter scoping (`New-ServicePrincipal` + `Add-RoleGroupMember`).
+3. **A certificate**, not a client secret. Exchange Online app-only has no client-secret path, which is why `-AuthMode ClientSecret` reports these sections as skipped.
+
+> **Certificate gotcha:** Exchange app-only does not accept CNG certificates, which is what modern Windows creates by default. The certificate must come from a CSP key provider. See [app-only authentication for Exchange Online PowerShell](https://learn.microsoft.com/powershell/exchange/app-only-auth-powershell-v2).
 
 ## Sections
 
