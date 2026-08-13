@@ -122,6 +122,7 @@
 param(
     [string]$TenantId,
 
+    [ValidateNotNullOrEmpty()]
     [string]$OutputPath = (Join-Path (Get-Location).Path 'soc-export'),
 
     [ValidateSet('Entra', 'Applications', 'Governance', 'Intune', 'DefenderXdr',
@@ -166,7 +167,45 @@ $script:SocScriptVersion = '1.0.0'
 # Load framework and collectors
 # ---------------------------------------------------------------------------
 
+# $PSScriptRoot is empty unless the script is executed as a file, so pasting the
+# contents into a console, running it through Invoke-Expression, or wrapping it
+# in a scriptblock leaves it blank. Every dot-source below would then fail with
+# "Cannot bind argument to parameter 'Path' because it is an empty string", and
+# the run would collapse further down with no obvious cause. Fail here instead,
+# saying what to do about it.
+# Property access is spelled defensively: Set-StrictMode is already active and
+# Common.ps1 (which provides the safe accessor) has not been loaded yet, so a
+# plain $MyInvocation.MyCommand.Path would itself throw in exactly the broken
+# case this block exists to diagnose.
 $root = $PSScriptRoot
+if (-not $root) {
+    $invocationPath = $MyInvocation.MyCommand.PSObject.Properties['Path']
+    if ($invocationPath -and $invocationPath.Value) {
+        $root = Split-Path -Parent $invocationPath.Value
+    }
+}
+if (-not $root) {
+    throw @'
+Cannot locate the script directory ($PSScriptRoot is empty).
+
+This script loads its framework from private/ and collectors/ next to itself, so
+it must be executed as a file rather than as pasted or piped script text.
+
+Run it as:      ./Export-SocTenantSettings.ps1 -TenantId contoso.onmicrosoft.com
+or:             pwsh -File ./Export-SocTenantSettings.ps1 -TenantId contoso.onmicrosoft.com
+
+Not as:         iex (Get-Content ./Export-SocTenantSettings.ps1 -Raw)
+                or by pasting the file contents into a console.
+'@
+}
+
+# Copying the entry point out of its folder is an easy mistake to make; say so
+# plainly rather than failing on the first missing function.
+foreach ($required in 'private', 'collectors') {
+    if (-not (Test-Path -LiteralPath (Join-Path $root $required) -PathType Container)) {
+        throw "Missing '$required' directory under '$root'. Copy the whole soc-tenant-export folder, not just this script."
+    }
+}
 
 # Order matters: Common defines helpers the others use at load time.
 foreach ($file in 'Common.ps1', 'Auth.ps1', 'RestClient.ps1', 'ExchangeClient.ps1', 'Registry.ps1', 'Report.ps1') {
@@ -295,5 +334,12 @@ if ($Archive) {
     Write-SocLog -Level Success -Message "Archive: $zip"
 }
 
-# Emit the export path so the script composes in a pipeline.
-Get-Item -LiteralPath $context.Root
+# Emit the export path so the script composes in a pipeline. The export itself
+# is already on disk by this point, so a failure here must not be what the
+# operator sees — report it and keep the successful exit.
+if ($context.Root -and (Test-Path -LiteralPath $context.Root)) {
+    Get-Item -LiteralPath $context.Root
+}
+else {
+    Write-SocLog -Level Warn -Message "Export directory not found for pipeline output: '$($context.Root)'"
+}
